@@ -42,6 +42,9 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+# -------------------------
+# Articles
+# -------------------------
 @app.get("/articles")
 def list_articles(
     limit: int = Query(20, ge=1, le=200),
@@ -149,6 +152,54 @@ def get_article_by_url(url: str) -> dict[str, Any]:
     return {"found": True, "item": item}
 
 
+@app.get("/articles/latest")
+def get_latest_article() -> dict[str, Any]:
+    """
+    1 najnovší článok – ideálne pre hero background (header_image_url / card_image_url).
+    """
+    sql = """
+        SELECT
+            url, type, title, date_text, date_iso,
+            card_image_url, header_image_url,
+            match_datetime_text, match_datetime_iso, match_round, match_score,
+            match_is_win, match_logo_home_url, match_logo_away_url,
+            content_text
+        FROM articles
+        ORDER BY COALESCE(date_iso, '') DESC, updated_at DESC
+        LIMIT 1
+    """
+
+    with db.conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            r = cur.fetchone()
+
+    if not r:
+        return {"found": False, "item": None}
+
+    item = {
+        "url": r[0],
+        "type": r[1],
+        "title": r[2],
+        "date_text": r[3],
+        "date_iso": r[4],
+        "card_image_url": r[5],
+        "header_image_url": r[6],
+        "match_datetime_text": r[7],
+        "match_datetime_iso": r[8],
+        "match_round": r[9],
+        "match_score": r[10],
+        "match_is_win": r[11],
+        "match_logo_home_url": r[12],
+        "match_logo_away_url": r[13],
+        "content_text": r[14],
+    }
+    return {"found": True, "item": item}
+
+
+# -------------------------
+# Matches
+# -------------------------
 @app.get("/matches")
 def list_matches(
     status: str | None = Query(None, description="upcoming/played"),
@@ -201,3 +252,249 @@ def list_matches(
     ]
 
     return {"items": items, "limit": limit, "offset": offset}
+
+
+@app.get("/matches/next")
+def get_next_match() -> dict[str, Any]:
+    """
+    Najbližší upcoming zápas (1 kus) – pre hero.
+    """
+    sql = """
+        SELECT
+            match_key, status, date_text, date_iso, round, venue,
+            team_home, team_away, logo_home_url, logo_away_url,
+            score, is_win, score_periods
+        FROM matches
+        WHERE status = 'upcoming'
+        ORDER BY COALESCE(date_iso, '') ASC
+        LIMIT 1
+    """
+
+    with db.conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            r = cur.fetchone()
+
+    if not r:
+        return {"found": False, "item": None}
+
+    item = {
+        "match_key": r[0],
+        "status": r[1],
+        "date_text": r[2],
+        "date_iso": r[3],
+        "round": r[4],
+        "venue": r[5],
+        "team_home": r[6],
+        "team_away": r[7],
+        "logo_home_url": r[8],
+        "logo_away_url": r[9],
+        "score": r[10],
+        "is_win": r[11],
+        "score_periods": r[12],
+    }
+    return {"found": True, "item": item}
+
+
+@app.get("/matches/last")
+def get_last_played_match() -> dict[str, Any]:
+    """
+    Posledný odohraný zápas (1 kus) – pre sekundárny blok na homepage.
+    """
+    sql = """
+        SELECT
+            match_key, status, date_text, date_iso, round, venue,
+            team_home, team_away, logo_home_url, logo_away_url,
+            score, is_win, score_periods
+        FROM matches
+        WHERE status = 'played'
+        ORDER BY COALESCE(date_iso, '') DESC
+        LIMIT 1
+    """
+
+    with db.conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            r = cur.fetchone()
+
+    if not r:
+        return {"found": False, "item": None}
+
+    item = {
+        "match_key": r[0],
+        "status": r[1],
+        "date_text": r[2],
+        "date_iso": r[3],
+        "round": r[4],
+        "venue": r[5],
+        "team_home": r[6],
+        "team_away": r[7],
+        "logo_home_url": r[8],
+        "logo_away_url": r[9],
+        "score": r[10],
+        "is_win": r[11],
+        "score_periods": r[12],
+    }
+    return {"found": True, "item": item}
+
+
+@app.get("/home")
+def home_payload(
+    articles_limit: int = Query(6, ge=1, le=30),
+    upcoming_limit: int = Query(6, ge=1, le=50),
+    played_limit: int = Query(6, ge=1, le=50),
+) -> dict[str, Any]:
+    """
+    Homepage payload – všetko v jednom requeste.
+    """
+    # latest_article
+    sql_latest_article = """
+        SELECT
+            url, type, title, date_text, date_iso,
+            card_image_url, header_image_url,
+            match_datetime_text, match_datetime_iso, match_round, match_score,
+            match_is_win, match_logo_home_url, match_logo_away_url,
+            content_text
+        FROM articles
+        ORDER BY COALESCE(date_iso, '') DESC, updated_at DESC
+        LIMIT 1
+    """
+
+    # latest_articles list
+    sql_latest_articles = """
+        SELECT
+            url, type, title, date_text, date_iso,
+            card_image_url, header_image_url,
+            match_datetime_text, match_datetime_iso, match_round, match_score,
+            match_is_win, match_logo_home_url, match_logo_away_url,
+            content_text
+        FROM articles
+        ORDER BY COALESCE(date_iso, '') DESC, updated_at DESC
+        LIMIT %s
+    """
+
+    # next_match
+    sql_next = """
+        SELECT
+            match_key, status, date_text, date_iso, round, venue,
+            team_home, team_away, logo_home_url, logo_away_url,
+            score, is_win, score_periods
+        FROM matches
+        WHERE status = 'upcoming'
+        ORDER BY COALESCE(date_iso, '') ASC
+        LIMIT 1
+    """
+
+    # last_match
+    sql_last = """
+        SELECT
+            match_key, status, date_text, date_iso, round, venue,
+            team_home, team_away, logo_home_url, logo_away_url,
+            score, is_win, score_periods
+        FROM matches
+        WHERE status = 'played'
+        ORDER BY COALESCE(date_iso, '') DESC
+        LIMIT 1
+    """
+
+    # upcoming list
+    sql_upcoming = """
+        SELECT
+            match_key, status, date_text, date_iso, round, venue,
+            team_home, team_away, logo_home_url, logo_away_url,
+            score, is_win, score_periods
+        FROM matches
+        WHERE status = 'upcoming'
+        ORDER BY COALESCE(date_iso, '') ASC
+        LIMIT %s
+    """
+
+    # played list
+    sql_played = """
+        SELECT
+            match_key, status, date_text, date_iso, round, venue,
+            team_home, team_away, logo_home_url, logo_away_url,
+            score, is_win, score_periods
+        FROM matches
+        WHERE status = 'played'
+        ORDER BY COALESCE(date_iso, '') DESC
+        LIMIT %s
+    """
+
+    with db.conn() as conn:
+        with conn.cursor() as cur:
+            # latest_article
+            cur.execute(sql_latest_article)
+            la = cur.fetchone()
+
+            # latest_articles
+            cur.execute(sql_latest_articles, (articles_limit,))
+            lrows = cur.fetchall()
+
+            # next + last
+            cur.execute(sql_next)
+            nm = cur.fetchone()
+
+            cur.execute(sql_last)
+            lm = cur.fetchone()
+
+            # lists
+            cur.execute(sql_upcoming, (upcoming_limit,))
+            urows = cur.fetchall()
+
+            cur.execute(sql_played, (played_limit,))
+            prows = cur.fetchall()
+
+    def map_article(r) -> dict[str, Any]:
+        return {
+            "url": r[0],
+            "type": r[1],
+            "title": r[2],
+            "date_text": r[3],
+            "date_iso": r[4],
+            "card_image_url": r[5],
+            "header_image_url": r[6],
+            "match_datetime_text": r[7],
+            "match_datetime_iso": r[8],
+            "match_round": r[9],
+            "match_score": r[10],
+            "match_is_win": r[11],
+            "match_logo_home_url": r[12],
+            "match_logo_away_url": r[13],
+            "content_text": r[14],
+        }
+
+    def map_match(r) -> dict[str, Any]:
+        return {
+            "match_key": r[0],
+            "status": r[1],
+            "date_text": r[2],
+            "date_iso": r[3],
+            "round": r[4],
+            "venue": r[5],
+            "team_home": r[6],
+            "team_away": r[7],
+            "logo_home_url": r[8],
+            "logo_away_url": r[9],
+            "score": r[10],
+            "is_win": r[11],
+            "score_periods": r[12],
+        }
+
+    latest_article = map_article(la) if la else None
+    latest_articles = [map_article(r) for r in lrows] if lrows else []
+
+    next_match = map_match(nm) if nm else None
+    last_match = map_match(lm) if lm else None
+
+    upcoming_matches = [map_match(r) for r in urows] if urows else []
+    played_matches = [map_match(r) for r in prows] if prows else []
+
+    return {
+        "next_match": next_match,
+        "last_match": last_match,
+        "latest_article": latest_article,
+        "latest_articles": latest_articles,
+        "upcoming_matches": upcoming_matches,
+        "played_matches": played_matches,
+    }
