@@ -8,16 +8,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.db import db
 
-# Načíta .env z rootu projektu (lokálne). Na Renderi sa env rieši cez dashboard.
+# Lokálne načíta .env (Render používa Environment Variables v dashboarde)
 load_dotenv()
 
 app = FastAPI(title="HC Košice API", version="1.0.0")
 
-# Ak budeš volať API z web appky (frontend), CORS sa hodí.
-# Neskôr to obmedz na konkrétne domény.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # neskôr obmedz na konkrétne domény
     allow_credentials=False,
     allow_methods=["GET"],
     allow_headers=["*"],
@@ -32,6 +30,11 @@ def _startup() -> None:
 @app.on_event("shutdown")
 def _shutdown() -> None:
     db.close()
+
+
+@app.get("/")
+def root() -> dict[str, str]:
+    return {"service": "HC Košice API", "health": "/health", "docs": "/docs"}
 
 
 @app.get("/health")
