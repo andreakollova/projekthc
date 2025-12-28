@@ -19,7 +19,7 @@ class DB:
 
         self._pool = SimpleConnectionPool(
             minconn=1,
-            maxconn=int(os.getenv("DB_POOL_MAX", "5")),
+            maxconn=int(os.getenv("DB_POOL_MAX", "1")),
             dsn=dsn,
             sslmode=os.getenv("DB_SSLMODE", "require"),
         )
