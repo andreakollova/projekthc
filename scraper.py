@@ -1,8 +1,8 @@
-# scraper.py
 from __future__ import annotations
 
 import argparse
 import logging
+import re
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -18,6 +18,8 @@ from parsers.article_type1 import parse_article_type1
 from parsers.article_type2 import parse_article_type2
 from parsers.zapasy_api import parse_matches_api_json
 from parsers.zapasy_reporty import parse_match_reports
+
+_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def setup_logging(log_dir: Path) -> logging.Logger:
@@ -53,9 +55,6 @@ def detect_article_type(html: str) -> str:
 
 
 def fetch_robots_unconditional(url: str, user_agent: str, timeout: int) -> str | None:
-    """
-    robots.txt vždy ťaháme unconditional – lebo 304 býva bez body a potom nevieme vyhodnotiť pravidlá.
-    """
     headers = {
         "User-Agent": user_agent,
         "Accept": "text/plain,*/*;q=0.8",
@@ -73,9 +72,6 @@ def fetch_robots_unconditional(url: str, user_agent: str, timeout: int) -> str |
 
 
 def fetch_html_unconditional(url: str, user_agent: str, timeout: int) -> tuple[int, str]:
-    """
-    List stránky ťaháme unconditional – nech máme HTML aj keď by server inak vrátil 304 bez body.
-    """
     headers = {
         "User-Agent": user_agent,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -86,34 +82,28 @@ def fetch_html_unconditional(url: str, user_agent: str, timeout: int) -> tuple[i
     return r.status_code, (r.text or "")
 
 
-def _normalize_match_key_for_join(match_key: str) -> str:
-    """
-    Konzervatívna normalizácia pre join:
-    - strip
-    - collapse whitespace
-    """
-    return " ".join((match_key or "").strip().split())
+def _normalize_key(s: str) -> str:
+    # NBSP + whitespace collapse
+    return " ".join((s or "").replace("\xa0", " ").strip().split())
 
 
-def _build_fallback_key(date_iso: str | None, round_text: str | None, home: str | None, away: str | None) -> str:
-    """
-    Fallback match_key presne v štýle API: date_iso|round|home|away
-    """
-    key_date = (date_iso or "").strip()
-    key_round = (round_text or "").strip()
-    key_home = (home or "").strip()
-    key_away = (away or "").strip()
-    return "|".join([key_date, key_round, key_home, key_away]).strip("|")
+def _date_day_from_iso(date_iso: str | None) -> str | None:
+    if not date_iso:
+        return None
+    m = _DATE_RE.search(date_iso)
+    return m.group(0) if m else None
 
 
-def _build_noround_key(date_any: str | None, home: str | None, away: str | None) -> str:
-    """
-    Fallback bez round: date|home|away (použijeme keď sa round líši formátom alebo chýba)
-    """
-    key_date = (date_any or "").strip()
-    key_home = (home or "").strip()
-    key_away = (away or "").strip()
-    return "|".join([key_date, key_home, key_away]).strip("|")
+def _join_key_day(date_iso: str | None, round_text: str | None, home: str | None, away: str | None) -> str:
+    date_day = _date_day_from_iso(date_iso) or ""
+    return "|".join(
+        [
+            date_day.strip(),
+            (round_text or "").strip(),
+            (home or "").strip(),
+            (away or "").strip(),
+        ]
+    ).strip("|")
 
 
 def main() -> int:
@@ -145,7 +135,7 @@ def main() -> int:
     )
 
     try:
-        # --- robots.txt (unconditional) ---
+        # --- ROBOTS ---
         robots_text = fetch_robots_unconditional(cfg.ROBOTS_URL, cfg.USER_AGENT, int(cfg.TIMEOUT))
         if not robots_text:
             logger.error("robots.txt sa nepodarilo stiahnuť (unconditional) – končím.")
@@ -155,7 +145,7 @@ def main() -> int:
         robots.load(robots_text, cfg.ROBOTS_URL)
         logger.info("robots.txt načítaný a spracovaný (unconditional).")
 
-        # --- NOVINKY list (unconditional) ---
+        # --- NOVINKY ---
         if not robots.can_fetch(cfg.NOVINKY_URL).allowed:
             logger.error(f"Zakázané robots.txt: {cfg.NOVINKY_URL}")
             return 3
@@ -175,7 +165,6 @@ def main() -> int:
                     logger.warning(f"Preskakujem (robots): {url}")
                     continue
 
-                # detail článku cez HttpClient (conditional GET + low footprint)
                 detail_res = http.get(url, extra_sleep=True, conditional=True)
 
                 if detail_res.status_code == 304:
@@ -216,7 +205,7 @@ def main() -> int:
                 }
 
                 if args.dry_run:
-                    logger.info(f"[DRY-RUN] Uložil by som článok: {row['type']} | {row['title']} | {row['url']}")
+                    logger.info(f"[DRY-RUN] článok: {row['type']} | {row['title']} | {row['url']}")
                 else:
                     inserted, updated = storage.upsert_article(row)
                     if inserted:
@@ -224,46 +213,45 @@ def main() -> int:
                     elif updated:
                         logger.info(f"UPDATE článok: {row['title']} | {row['url']}")
 
-        # --- ZÁPASY (HTML + API) ---
+        # --- ZÁPASY ---
         if not robots.can_fetch(cfg.ZAPASY_URL).allowed:
             logger.error(f"Zakázané robots.txt: {cfg.ZAPASY_URL}")
             return 4
 
-        # 1) HTML page (cookies/session) + použijeme HTML aj na reporty
+        # HTML (reporty)
         html_res = http.get(cfg.ZAPASY_URL, extra_sleep=False, conditional=False)
         html_text = (html_res.text or "").strip()
 
-        report_items: list[dict] = []
+        report_items = []
         if html_res.status_code == 200 and html_text:
             report_items = parse_match_reports(html_text, cfg.BASE_URL)
         else:
             logger.warning(f"Zápasy HTML: bez obsahu alebo status={html_res.status_code} – reporty preskakujem.")
 
-        # 2) mapa reportov – uložíme viac variant kľúča
+        # reports_map – uložíme viacero variantov kľúčov
         reports_map: dict[str, str] = {}
         for x in report_items or []:
             ru = (x.get("report_url") or "").strip()
             if not ru:
                 continue
 
-            candidates = [
+            for k in (
                 x.get("match_key"),
                 x.get("match_key_swapped"),
-                x.get("match_key_noround"),
-                x.get("match_key_noround_swapped"),
-            ]
-            for mk in candidates:
-                mk_norm = _normalize_match_key_for_join(mk or "")
-                if mk_norm:
-                    reports_map[mk_norm] = ru
+                x.get("join_key"),
+                x.get("join_key_swapped"),
+            ):
+                kk = _normalize_key(k or "")
+                if kk:
+                    reports_map[kk] = ru
 
-        logger.info(
-            f"Reporty: items={len(report_items) if isinstance(report_items, list) else 0} | map={len(reports_map)}"
-        )
+        logger.info(f"Reporty: items={len(report_items)} | map={len(reports_map)}")
         if report_items:
             logger.info(f"Report sample item: {report_items[0]}")
+        if reports_map:
+            logger.info(f"Report sample keys: {list(reports_map.keys())[:5]}")
 
-        # 3) API call – ako XHR v browseri
+        # API zápasy
         api_headers = {
             "Accept": "application/json, text/plain, */*",
             "X-Requested-With": "XMLHttpRequest",
@@ -274,7 +262,7 @@ def main() -> int:
         api_res = http.get(
             cfg.ZAPASY_API_URL,
             extra_sleep=False,
-            conditional=False,  # dôležité: nech nedostaneš 304 bez body
+            conditional=False,
             extra_headers=api_headers,
         )
 
@@ -284,48 +272,40 @@ def main() -> int:
         else:
             matches = parse_matches_api_json(json_text)
             logger.info(f"Zápasy: našlo sa {len(matches)} položiek (API).")
-
             if matches:
-                logger.info(f"API sample keys: {[m.get('match_key') for m in matches[:3]]}")
+                logger.info(f"API sample match: {matches[0]}")
 
             matched_reports = 0
+            debug_misses = 0
 
             for m in matches:
-                report_url = None
+                mk_api = _normalize_key(m.get("match_key") or "")
 
-                # (A) priamy match_key (normalizovaný)
-                mk_api = _normalize_match_key_for_join(m.get("match_key") or "")
-                if mk_api:
-                    report_url = reports_map.get(mk_api)
+                # join key podľa dňa (bez času)
+                jk = _normalize_key(
+                    _join_key_day(m.get("date_iso"), m.get("round"), m.get("team_home"), m.get("team_away"))
+                )
+                jk_swapped = _normalize_key(
+                    _join_key_day(m.get("date_iso"), m.get("round"), m.get("team_away"), m.get("team_home"))
+                )
 
-                # (B) fallback: zlož key ako date_iso|round|home|away
-                if not report_url:
-                    fallback = _normalize_match_key_for_join(
-                        _build_fallback_key(
-                            m.get("date_iso"),
-                            m.get("round"),
-                            m.get("team_home"),
-                            m.get("team_away"),
-                        )
-                    )
-                    if fallback:
-                        report_url = reports_map.get(fallback)
-
-                # (C) fallback bez round + aj swapped
-                if not report_url:
-                    date_any = (m.get("date_iso") or m.get("date_text") or "").strip()
-                    home = (m.get("team_home") or "").strip()
-                    away = (m.get("team_away") or "").strip()
-
-                    mk_noround = _normalize_match_key_for_join(_build_noround_key(date_any, home, away))
-                    mk_noround_swapped = _normalize_match_key_for_join(_build_noround_key(date_any, away, home))
-
-                    report_url = reports_map.get(mk_noround) or reports_map.get(mk_noround_swapped)
-
-                m["report_url"] = report_url
+                report_url = (
+                    reports_map.get(mk_api)
+                    or reports_map.get(jk)
+                    or reports_map.get(jk_swapped)
+                )
 
                 if report_url:
                     matched_reports += 1
+                    m["report_url"] = report_url
+                else:
+                    m["report_url"] = None
+                    if debug_misses < 5:
+                        debug_misses += 1
+                        logger.info(
+                            "MISS report join | "
+                            f"mk_api='{mk_api}' | jk='{jk}' | jk_swapped='{jk_swapped}'"
+                        )
 
                 if args.dry_run:
                     logger.info(

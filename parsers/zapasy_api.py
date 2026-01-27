@@ -4,13 +4,28 @@ import json
 import re
 
 _DIGIT_SCORE_RE = re.compile(r"\d+\s*:\s*\d+")
+_TZ_FIX_RE = re.compile(r"([+-]\d{2}):(\d{2})$")  # +01:00 -> +0100
 
 
 def _norm_str(x) -> str | None:
     if x is None:
         return None
-    s = str(x).strip()
+    s = str(x).replace("\xa0", " ").strip()
+    s = " ".join(s.split())
     return s or None
+
+
+def _norm_tz(date_iso: str | None) -> str | None:
+    """
+    Zjednotí formát timezone medzi API a HTML:
+    - API občas vracia ...+01:00
+    - HTML má ...+0100
+    """
+    if not date_iso:
+        return None
+    s = date_iso.strip()
+    s = _TZ_FIX_RE.sub(r"\1\2", s)
+    return s
 
 
 def _to_int_bool(v) -> int | None:
@@ -52,7 +67,7 @@ def parse_matches_api_json(json_text: str) -> list[dict]:
         if not isinstance(it, dict):
             continue
 
-        date_iso = _norm_str(it.get("date"))  # napr. 2025-08-16T15:00:00+0200
+        date_iso = _norm_tz(_norm_str(it.get("date")))  # napr. 2026-01-25T15:00:00+0100
         date_text = _norm_str(it.get("dateFormatted"))
 
         match_status = _norm_str(it.get("matchStatus"))  # played/upcoming
