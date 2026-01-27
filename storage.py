@@ -26,10 +26,6 @@ class Storage:
     def __init__(self) -> None:
         self.db_url = build_postgres_url()
 
-        # Stabilnejšie pripojenie (low risk, high value)
-        # - connect_timeout: nech sa nezasekne
-        # - keepalive: nech spojenie neumiera pri idle
-        # - sslmode=require: nech je to vždy cez SSL
         self.conn = psycopg2.connect(
             self.db_url,
             cursor_factory=RealDictCursor,
@@ -40,13 +36,11 @@ class Storage:
             keepalives_count=3,
             sslmode="require",
         )
-
-        # Jednoduchšie transakcie pre scraper (každý statement ide hneď do DB po commit-e,
-        # a nevzniknú ti visiace transakcie pri výnimkách)
         self.conn.autocommit = False
 
+        self.stats = StorageStats()
+
     def close(self) -> None:
-        # Bezpečné ukončenie – ak bola otvorená transakcia, radšej rollback
         try:
             if self.conn and not self.conn.closed:
                 try:
@@ -61,7 +55,6 @@ class Storage:
         try:
             self.conn.commit()
         except Exception:
-            # keď commit padne, transakcia ostane "poškodená" – treba rollback
             try:
                 self.conn.rollback()
             except Exception:
@@ -108,6 +101,7 @@ class Storage:
             );
             """)
 
+            # match_key je PRIMARY KEY => unique je už automaticky garantované
             cur.execute("""
             CREATE TABLE IF NOT EXISTS matches (
                 match_key TEXT PRIMARY KEY,
@@ -192,6 +186,7 @@ class Storage:
                 );
                 """, data)
                 self._commit()
+                self.stats.articles_inserted += 1
                 return True, False
 
             cur.execute("""
@@ -219,11 +214,19 @@ class Storage:
             """, data)
 
         self._commit()
+        self.stats.articles_updated += 1
         return False, True
 
     # --- matches ---
-    def upsert_match(self, data: dict[str, Any]) -> None:
+    def upsert_match(self, data: dict[str, Any]) -> tuple[bool, bool]:
+        """
+        UPSERT match podľa match_key.
+        Returns (inserted, updated)
+
+        Poznámka: match_key musí byť stabilný (bez statusu), inak vznikajú duplicity.
+        """
         with self.conn.cursor() as cur:
+            # x-max = 0 znamená, že INSERT sa naozaj vložil (nebol konflikt)
             cur.execute("""
             INSERT INTO matches (
               match_key, status, date_text, date_iso, round, venue,
@@ -250,7 +253,14 @@ class Storage:
               is_win = EXCLUDED.is_win,
               score_periods = EXCLUDED.score_periods,
               last_seen_at = now(),
-              updated_at = now();
+              updated_at = now()
+            RETURNING (xmax = 0) AS inserted;
             """, data)
 
+            row = cur.fetchone()
+            inserted = bool(row["inserted"]) if row and "inserted" in row else False
+
         self._commit()
+
+        self.stats.matches_upserted += 1
+        return inserted, (not inserted)

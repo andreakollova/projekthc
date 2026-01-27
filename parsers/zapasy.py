@@ -84,12 +84,13 @@ def parse_matches(html: str, base_url: str) -> list[dict]:
         # --- dátum ---
         time_el = item.select_one("time.matches-list__date")
         date_text = time_el.get_text(" ", strip=True) if time_el else None
-        date_iso = None
+
         if time_el and time_el.get("datetime"):
-            date_iso = time_el.get("datetime")
+            date_iso = (time_el.get("datetime") or "").strip() or None
         else:
             # fallback parse z textu
-            date_iso = parse_datetime_safe(date_text or "")
+            parsed = parse_datetime_safe(date_text or "")
+            date_iso = (parsed or "").strip() or None
 
         # --- kolo ---
         round_el = item.select_one(".matches-list__round")
@@ -119,14 +120,14 @@ def parse_matches(html: str, base_url: str) -> list[dict]:
 
         # --- skóre + win/lose ---
         score_el = item.select_one(".matches-list__score")
-        score_text = score_el.get_text(" ", strip=True) if score_el else None
+        raw_score_text = score_el.get_text(" ", strip=True) if score_el else None
 
         periods_el = item.select_one(".matches-list__score-periods")
         score_periods = periods_el.get_text(" ", strip=True) if periods_el else None
 
         # status: played/upcoming
         # upcoming môže mať score element, ale text býva "VS"
-        status = "played" if _is_real_score(score_text) or score_periods else "upcoming"
+        status = "played" if _is_real_score(raw_score_text) or score_periods else "upcoming"
 
         is_win = None
         if score_el and status == "played":
@@ -134,34 +135,38 @@ def parse_matches(html: str, base_url: str) -> list[dict]:
             # na webe je často matches-list__score--win
             is_win = 1 if any(c.endswith("__score--win") or c == "matches-list__score--win" for c in classes) else 0
 
-        score = score_text if status == "played" else None
+        # score uložíme len ak je reálne "X:Y"
+        score = raw_score_text if (status == "played" and _is_real_score(raw_score_text)) else None
+
         if status == "upcoming":
             score_periods = None
 
         # --- match_key (stabilný, vhodný pre DB) ---
-        # použijeme datetime (ak je), inak date_text
+        # DÔLEŽITÉ: match_key NESMIE obsahovať status, inak vznikajú duplicity (upcoming vs played)
+        # Preferujeme ISO datetime, fallback na text
         key_date = (date_iso or "").strip() or (date_text or "").strip()
         key_round = (round_text or "").strip()
         key_home = (team_home or "").strip()
         key_away = (team_away or "").strip()
-        key_status = status
 
-        match_key = "|".join([key_status, key_date, key_round, key_home, key_away]).strip("|")
+        match_key = "|".join([key_date, key_round, key_home, key_away]).strip("|")
 
-        results.append({
-            "match_key": match_key,
-            "status": status,
-            "date_text": date_text,
-            "date_iso": date_iso,
-            "round": round_text,
-            "venue": venue,
-            "team_home": team_home,
-            "team_away": team_away,
-            "logo_home_url": logo_home_url,
-            "logo_away_url": logo_away_url,
-            "score": score,
-            "is_win": is_win,
-            "score_periods": score_periods,
-        })
+        results.append(
+            {
+                "match_key": match_key,
+                "status": status,
+                "date_text": date_text,
+                "date_iso": date_iso,
+                "round": round_text,
+                "venue": venue,
+                "team_home": team_home,
+                "team_away": team_away,
+                "logo_home_url": logo_home_url,
+                "logo_away_url": logo_away_url,
+                "score": score,
+                "is_win": is_win,
+                "score_periods": score_periods,
+            }
+        )
 
     return results

@@ -75,7 +75,7 @@ def parse_matches_api_json(json_text: str) -> list[dict]:
         score_text = _norm_str(it.get("score") or it.get("result") or it.get("finalScore"))
         score_periods = _norm_str(it.get("scorePeriods") or it.get("periods") or it.get("score_periods"))
 
-        # status override ak je score ale matchStatus chýba
+        # status override ak je score ale matchStatus chýba / je nespoľahlivé
         if status == "upcoming" and (_is_real_score(score_text) or score_periods):
             status = "played"
 
@@ -87,15 +87,19 @@ def parse_matches_api_json(json_text: str) -> list[dict]:
             elif "win" in it:
                 is_win = _to_int_bool(it.get("win"))
 
-        score = score_text if status == "played" else None
+        # score uložíme len ak je reálne "X:Y"
+        score = score_text if (status == "played" and _is_real_score(score_text)) else None
         score_periods = score_periods if status == "played" else None
 
-        # stabilný match_key
-        key_date = (date_iso or date_text or "").strip()
+        # --- stabilný match_key ---
+        # DÔLEŽITÉ: match_key NESMIE obsahovať status, inak vznikajú duplicity (upcoming vs played)
+        # Preferujeme ISO datetime, fallback na text
+        key_date = (date_iso or "").strip() or (date_text or "").strip()
         key_round = (round_text or "").strip()
         key_home = (team_home or "").strip()
         key_away = (team_away or "").strip()
-        match_key = "|".join([status, key_date, key_round, key_home, key_away]).strip("|")
+
+        match_key = "|".join([key_date, key_round, key_home, key_away]).strip("|")
 
         results.append(
             {
