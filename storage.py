@@ -64,19 +64,23 @@ class Storage:
     def init_schema(self) -> None:
         """
         Vytvorí tabuľky v Postgrese – bezpečne, iba ak neexistujú.
-        Poznámka: CREATE TABLE IF NOT EXISTS neupraví existujúce tabuľky (na to slúži ALTER TABLE v DB).
+        Poznámka: CREATE TABLE IF NOT EXISTS neupraví existujúce tabuľky.
+        Ak už tabuľka existuje a pridávaš nový stĺpec, sprav to cez ALTER TABLE v DB.
         """
         with self.conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
             CREATE TABLE IF NOT EXISTS http_meta (
                 url TEXT PRIMARY KEY,
                 etag TEXT,
                 last_modified TEXT,
                 updated_at TIMESTAMPTZ DEFAULT now()
             );
-            """)
+            """
+            )
 
-            cur.execute("""
+            cur.execute(
+                """
             CREATE TABLE IF NOT EXISTS articles (
                 url TEXT PRIMARY KEY,
                 type TEXT,
@@ -100,10 +104,12 @@ class Storage:
                 last_seen_at TIMESTAMPTZ DEFAULT now(),
                 updated_at TIMESTAMPTZ DEFAULT now()
             );
-            """)
+            """
+            )
 
             # match_key je PRIMARY KEY => unique je už automaticky garantované
-            cur.execute("""
+            cur.execute(
+                """
             CREATE TABLE IF NOT EXISTS matches (
                 match_key TEXT PRIMARY KEY,
                 status TEXT, -- upcoming / played
@@ -124,9 +130,11 @@ class Storage:
                 last_seen_at TIMESTAMPTZ DEFAULT now(),
                 updated_at TIMESTAMPTZ DEFAULT now()
             );
-            """)
+            """
+            )
 
-            cur.execute("""
+            cur.execute(
+                """
             CREATE TABLE IF NOT EXISTS runs (
                 id BIGSERIAL PRIMARY KEY,
                 started_at TIMESTAMPTZ DEFAULT now(),
@@ -134,7 +142,8 @@ class Storage:
                 request_count INTEGER,
                 notes TEXT
             );
-            """)
+            """
+            )
 
         self._commit()
 
@@ -147,14 +156,18 @@ class Storage:
 
     def upsert_meta(self, url: str, etag: str | None, last_modified: str | None) -> None:
         with self.conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
             INSERT INTO http_meta (url, etag, last_modified, updated_at)
             VALUES (%s, %s, %s, now())
             ON CONFLICT (url) DO UPDATE SET
                 etag = EXCLUDED.etag,
                 last_modified = EXCLUDED.last_modified,
                 updated_at = now();
-            """, (url, etag, last_modified))
+            """
+                ,
+                (url, etag, last_modified),
+            )
         self._commit()
 
     # --- articles ---
@@ -172,7 +185,8 @@ class Storage:
             existing = cur.fetchone()
 
             if not existing:
-                cur.execute("""
+                cur.execute(
+                    """
                 INSERT INTO articles (
                   url, type, title, date_text, date_iso, card_image_url, header_image_url,
                   match_datetime_text, match_datetime_iso, match_round, match_score, match_is_win,
@@ -186,12 +200,15 @@ class Storage:
                   %(content_html)s, %(content_text)s,
                   now(), now()
                 );
-                """, data)
+                """,
+                    data,
+                )
                 self._commit()
                 self.stats.articles_inserted += 1
                 return True, False
 
-            cur.execute("""
+            cur.execute(
+                """
             UPDATE articles SET
               type = %(type)s,
               title = %(title)s,
@@ -213,7 +230,9 @@ class Storage:
               last_seen_at = now(),
               updated_at = now()
             WHERE url = %(url)s;
-            """, data)
+            """,
+                data,
+            )
 
         self._commit()
         self.stats.articles_updated += 1
@@ -227,6 +246,11 @@ class Storage:
 
         Poznámka: match_key musí byť stabilný (bez statusu), inak vznikajú duplicity.
         """
+        # aby nezlyhalo, keď report_url nie je v dict-e (napr. starý kód)
+        if "report_url" not in data:
+            data = dict(data)
+            data["report_url"] = None
+
         with self.conn.cursor() as cur:
             cur.execute(
                 """
