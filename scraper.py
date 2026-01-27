@@ -16,6 +16,7 @@ from parsers.novinky import parse_novinky_list
 from parsers.article_type1 import parse_article_type1
 from parsers.article_type2 import parse_article_type2
 from parsers.zapasy_api import parse_matches_api_json
+from parsers.zapasy_reporty import parse_report_links
 
 
 def setup_logging(log_dir: Path) -> logging.Logger:
@@ -187,16 +188,24 @@ def main() -> int:
                     elif updated:
                         logger.info(f"UPDATE článok: {row['title']} | {row['url']}")
 
-        # --- ZÁPASY cez API ---
-        # robots check – aspoň stránka musí byť povolená
+        # --- ZÁPASY cez API + REPORT linky z HTML ---
         if not robots.can_fetch(cfg.ZAPASY_URL).allowed:
             logger.error(f"Zakázané robots.txt: {cfg.ZAPASY_URL}")
             return 4
 
-        # 1) warm-up page (unconditional) – kvôli cookies/session
+        # 1) Získaj HTML list zápasov (unconditional) a vyparsuj report linky
+        status, zapasy_html = fetch_html_unconditional(cfg.ZAPASY_URL, cfg.USER_AGENT, int(cfg.TIMEOUT))
+        if status != 200 or not zapasy_html.strip():
+            logger.warning(f"Zápasy list (HTML): bez obsahu alebo status={status} – reporty nebudú k dispozícii.")
+            report_map: dict[str, str] = {}
+        else:
+            report_map = parse_report_links(zapasy_html, cfg.BASE_URL)
+            logger.info(f"Reporty: našlo sa {len(report_map)} linkov (HTML list).")
+
+        # 2) warm-up page cez HttpClient (kvôli cookies/session)
         _ = http.get(cfg.ZAPASY_URL, extra_sleep=False, conditional=False)
 
-        # 2) API call – ako XHR v browseri
+        # 3) API call – ako XHR v browseri
         api_headers = {
             "Accept": "application/json, text/plain, */*",
             "X-Requested-With": "XMLHttpRequest",
@@ -220,9 +229,14 @@ def main() -> int:
             logger.info(f"Zápasy: našlo sa {len(matches)} položiek (API).")
 
             for m in matches:
+                # priraď report_url podľa match_key (stabilný key_date|round|home|away)
+                m["report_url"] = report_map.get(m.get("match_key", ""))
+
                 if args.dry_run:
+                    rep = m.get("report_url")
+                    rep_txt = f" | report={rep}" if rep else ""
                     logger.info(
-                        f"[DRY-RUN] Uložil by som zápas: {m['status']} | {m['team_home']} vs {m['team_away']} | {m['date_text']}"
+                        f"[DRY-RUN] Uložil by som zápas: {m['status']} | {m['team_home']} vs {m['team_away']} | {m['date_text']}{rep_txt}"
                     )
                 else:
                     storage.upsert_match(m)

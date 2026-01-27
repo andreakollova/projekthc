@@ -64,6 +64,7 @@ class Storage:
     def init_schema(self) -> None:
         """
         Vytvorí tabuľky v Postgrese – bezpečne, iba ak neexistujú.
+        Poznámka: CREATE TABLE IF NOT EXISTS neupraví existujúce tabuľky (na to slúži ALTER TABLE v DB).
         """
         with self.conn.cursor() as cur:
             cur.execute("""
@@ -118,6 +119,7 @@ class Storage:
                 score TEXT,
                 is_win INTEGER,
                 score_periods TEXT,
+                report_url TEXT,
 
                 last_seen_at TIMESTAMPTZ DEFAULT now(),
                 updated_at TIMESTAMPTZ DEFAULT now()
@@ -226,36 +228,42 @@ class Storage:
         Poznámka: match_key musí byť stabilný (bez statusu), inak vznikajú duplicity.
         """
         with self.conn.cursor() as cur:
-            # x-max = 0 znamená, že INSERT sa naozaj vložil (nebol konflikt)
-            cur.execute("""
-            INSERT INTO matches (
-              match_key, status, date_text, date_iso, round, venue,
-              team_home, team_away, logo_home_url, logo_away_url,
-              score, is_win, score_periods,
-              last_seen_at, updated_at
-            ) VALUES (
-              %(match_key)s, %(status)s, %(date_text)s, %(date_iso)s, %(round)s, %(venue)s,
-              %(team_home)s, %(team_away)s, %(logo_home_url)s, %(logo_away_url)s,
-              %(score)s, %(is_win)s, %(score_periods)s,
-              now(), now()
+            cur.execute(
+                """
+                INSERT INTO matches (
+                  match_key, status, date_text, date_iso, round, venue,
+                  team_home, team_away, logo_home_url, logo_away_url,
+                  score, is_win, score_periods, report_url,
+                  last_seen_at, updated_at
+                ) VALUES (
+                  %(match_key)s, %(status)s, %(date_text)s, %(date_iso)s, %(round)s, %(venue)s,
+                  %(team_home)s, %(team_away)s, %(logo_home_url)s, %(logo_away_url)s,
+                  %(score)s, %(is_win)s, %(score_periods)s, %(report_url)s,
+                  now(), now()
+                )
+                ON CONFLICT (match_key) DO UPDATE SET
+                  status = EXCLUDED.status,
+                  date_text = EXCLUDED.date_text,
+                  date_iso = EXCLUDED.date_iso,
+                  round = EXCLUDED.round,
+                  venue = EXCLUDED.venue,
+                  team_home = EXCLUDED.team_home,
+                  team_away = EXCLUDED.team_away,
+                  logo_home_url = EXCLUDED.logo_home_url,
+                  logo_away_url = EXCLUDED.logo_away_url,
+                  score = EXCLUDED.score,
+                  is_win = EXCLUDED.is_win,
+                  score_periods = EXCLUDED.score_periods,
+
+                  -- neprepisuj existujúci report_url na NULL
+                  report_url = COALESCE(EXCLUDED.report_url, matches.report_url),
+
+                  last_seen_at = now(),
+                  updated_at = now()
+                RETURNING (xmax = 0) AS inserted;
+                """,
+                data,
             )
-            ON CONFLICT (match_key) DO UPDATE SET
-              status = EXCLUDED.status,
-              date_text = EXCLUDED.date_text,
-              date_iso = EXCLUDED.date_iso,
-              round = EXCLUDED.round,
-              venue = EXCLUDED.venue,
-              team_home = EXCLUDED.team_home,
-              team_away = EXCLUDED.team_away,
-              logo_home_url = EXCLUDED.logo_home_url,
-              logo_away_url = EXCLUDED.logo_away_url,
-              score = EXCLUDED.score,
-              is_win = EXCLUDED.is_win,
-              score_periods = EXCLUDED.score_periods,
-              last_seen_at = now(),
-              updated_at = now()
-            RETURNING (xmax = 0) AS inserted;
-            """, data)
 
             row = cur.fetchone()
             inserted = bool(row["inserted"]) if row and "inserted" in row else False
