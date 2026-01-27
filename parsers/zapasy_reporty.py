@@ -1,35 +1,36 @@
 from __future__ import annotations
 
+import unicodedata
 from bs4 import BeautifulSoup
 
 
-def _norm(x: str | None) -> str | None:
+def _norm_text(x: str | None) -> str | None:
     if x is None:
         return None
-    s = str(x).strip()
+    s = str(x).replace("\xa0", " ").strip()
+    s = " ".join(s.split())
+    s = unicodedata.normalize("NFKC", s)
     return s or None
 
 
-def _mk(key_date: str, key_round: str, home: str, away: str) -> str:
-    return "|".join([key_date, key_round, home, away]).strip("|")
+def _abs_url(base_url: str, href: str) -> str:
+    href = (href or "").strip()
+    if href.startswith("http"):
+        return href
+    if href.startswith("/"):
+        return base_url.rstrip("/") + href
+    return base_url.rstrip("/") + "/" + href
 
 
 def parse_match_reports(html: str, base_url: str) -> list[dict]:
     """
     Vytiahne report_url z HTML stránky zápasov.
-    Vráti list dictov:
-      {
-        match_key: date|round|home|away,
-        match_key_swapped: date|round|away|home,
-        report_url: ...
-      }
-
-    match_key musí byť kompatibilný so zapasy_api.py kľúčom,
-    ale keď HTML poradie tímov nesedí s API, použijeme match_key_swapped.
+    Vráti list dictov: {date_iso, date_text, round, team_home, team_away, match_key, match_key_noround, report_url}
     """
     soup = BeautifulSoup(html, "lxml")
     out: list[dict] = []
 
+    # Tip: keď sú tabu, toto zoberie aj played aj upcoming, ale report link filtruje
     for item in soup.select(".matches-list__item"):
         # report link
         report_a = None
@@ -45,41 +46,44 @@ def parse_match_reports(html: str, base_url: str) -> list[dict]:
         if not report_a:
             continue
 
-        href = (report_a.get("href") or "").strip()
-        if not href:
+        report_url = _abs_url(base_url, report_a.get("href") or "")
+        if not report_url:
             continue
 
-        if href.startswith("http"):
-            report_url = href
-        else:
-            report_url = base_url.rstrip("/") + (href if href.startswith("/") else "/" + href)
-
-        # date
         time_el = item.select_one("time.matches-list__date")
-        date_text = time_el.get_text(" ", strip=True) if time_el else None
-        date_iso = _norm(time_el.get("datetime")) if time_el else None
-        key_date = (date_iso or "").strip() or (date_text or "").strip()
+        date_text = _norm_text(time_el.get_text(" ", strip=True) if time_el else None)
+        date_iso = _norm_text(time_el.get("datetime") if time_el else None)
 
-        # round
         round_el = item.select_one(".matches-list__round")
-        round_text = _norm(round_el.get_text(" ", strip=True) if round_el else None)
-        key_round = (round_text or "").strip()
+        round_text = _norm_text(round_el.get_text(" ", strip=True) if round_el else None)
 
-        # teams (HTML order)
         team_names = [
-            x.get_text(" ", strip=True)
-            for x in item.select(".matches-list__team-names > .matches-list__team-name")
+            _norm_text(x.get_text(" ", strip=True))
+            for x in item.select(".matches-list__team-names .matches-list__team-name")
         ]
-        t1 = _norm(team_names[0] if len(team_names) > 0 else None)
-        t2 = _norm(team_names[1] if len(team_names) > 1 else None)
+        team_home = team_names[0] if len(team_names) > 0 else None
+        team_away = team_names[1] if len(team_names) > 1 else None
 
-        if not key_date or not key_round or not t1 or not t2:
+        key_date = (date_iso or date_text or "").strip()
+        key_round = (round_text or "").strip()
+        key_home = (team_home or "").strip()
+        key_away = (team_away or "").strip()
+
+        match_key = "|".join([key_date, key_round, key_home, key_away]).strip("|")
+        match_key_noround = "|".join([key_date, key_home, key_away]).strip("|")
+
+        if not key_date or not key_home or not key_away:
             continue
 
         out.append(
             {
-                "match_key": _mk(key_date, key_round, t1, t2),
-                "match_key_swapped": _mk(key_date, key_round, t2, t1),
+                "date_iso": date_iso,
+                "date_text": date_text,
+                "round": round_text,
+                "team_home": team_home,
+                "team_away": team_away,
+                "match_key": match_key,
+                "match_key_noround": match_key_noround,
                 "report_url": report_url,
             }
         )

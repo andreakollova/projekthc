@@ -1,7 +1,9 @@
+# scraper.py
 from __future__ import annotations
 
 import argparse
 import logging
+import unicodedata
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -79,16 +81,32 @@ def fetch_html_unconditional(url: str, user_agent: str, timeout: int) -> tuple[i
     return r.status_code, (r.text or "")
 
 
-def _normalize_match_key_for_join(match_key: str) -> str:
-    return " ".join((match_key or "").strip().split())
+def _norm_key(s: str) -> str:
+    """
+    Normalizácia match_key pre join:
+    - nahradí NBSP
+    - zjednotí whitespace
+    - Unicode NFKC
+    """
+    s = (s or "").replace("\xa0", " ").strip()
+    s = " ".join(s.split())
+    s = unicodedata.normalize("NFKC", s)
+    return s
 
 
-def _build_fallback_key(date_iso: str | None, round_text: str | None, home: str | None, away: str | None) -> str:
-    key_date = (date_iso or "").strip()
-    key_round = (round_text or "").strip()
-    key_home = (home or "").strip()
-    key_away = (away or "").strip()
+def _build_key_full(date_val: str | None, round_text: str | None, home: str | None, away: str | None) -> str:
+    key_date = _norm_key(date_val or "")
+    key_round = _norm_key(round_text or "")
+    key_home = _norm_key(home or "")
+    key_away = _norm_key(away or "")
     return "|".join([key_date, key_round, key_home, key_away]).strip("|")
+
+
+def _build_key_noround(date_val: str | None, home: str | None, away: str | None) -> str:
+    key_date = _norm_key(date_val or "")
+    key_home = _norm_key(home or "")
+    key_away = _norm_key(away or "")
+    return "|".join([key_date, key_home, key_away]).strip("|")
 
 
 def main() -> int:
@@ -100,6 +118,7 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="Nevkladá do DB, iba vypíše, čo by uložil.")
     ap.add_argument("--novinky-limit", type=int, default=cfg.NOVINKY_LIMIT)
     ap.add_argument("--max-requests", type=int, default=cfg.MAX_REQUESTS_PER_RUN)
+    ap.add_argument("--debug-zapasy-html", action="store_true", help="Uloží HTML zápasov do data/debug_zapasy.html.")
     args = ap.parse_args()
 
     storage = Storage()
@@ -120,6 +139,7 @@ def main() -> int:
     )
 
     try:
+        # --- robots.txt (unconditional) ---
         robots_text = fetch_robots_unconditional(cfg.ROBOTS_URL, cfg.USER_AGENT, int(cfg.TIMEOUT))
         if not robots_text:
             logger.error("robots.txt sa nepodarilo stiahnuť (unconditional) – končím.")
@@ -202,39 +222,46 @@ def main() -> int:
             logger.error(f"Zakázané robots.txt: {cfg.ZAPASY_URL}")
             return 4
 
-        # HTML (reporty)
+        # 1) HTML (reporty)
         html_res = http.get(cfg.ZAPASY_URL, extra_sleep=False, conditional=False)
         html_text = (html_res.text or "").strip()
 
-        report_items = []
+        if args.debug_zapasy_html:
+            debug_path = cfg.DATA_DIR / "debug_zapasy.html"
+            debug_path.write_text(html_text or "", encoding="utf-8")
+            logger.info(f"DEBUG: zapasy HTML uložené do {debug_path}")
+            logger.info(f"DEBUG: contains 'Report' = {('Report' in (html_text or ''))}")
+
+        report_items: list[dict] = []
         if html_res.status_code == 200 and html_text:
             report_items = parse_match_reports(html_text, cfg.BASE_URL)
         else:
             logger.warning(f"Zápasy HTML: bez obsahu alebo status={html_res.status_code} – reporty preskakujem.")
 
-        # MAPA reportov – uložíme obe verzie kľúča
-        reports_map: dict[str, str] = {}
+        # mapy reportov (full + noround)
+        reports_map_full: dict[str, str] = {}
+        reports_map_noround: dict[str, str] = {}
+
         for x in report_items or []:
             ru = (x.get("report_url") or "").strip()
             if not ru:
                 continue
 
-            mk1 = _normalize_match_key_for_join(x.get("match_key") or "")
-            mk2 = _normalize_match_key_for_join(x.get("match_key_swapped") or "")
+            mk_full = _norm_key(x.get("match_key") or "")
+            mk_nr = _norm_key(x.get("match_key_noround") or "")
 
-            if mk1:
-                reports_map[mk1] = ru
-            if mk2:
-                reports_map[mk2] = ru
+            if mk_full:
+                reports_map_full[mk_full] = ru
+            if mk_nr:
+                reports_map_noround[mk_nr] = ru
 
         logger.info(
-            f"Reporty: items={len(report_items) if isinstance(report_items, list) else 0} | "
-            f"map={len(reports_map)}"
+            f"Reporty: items={len(report_items)} | map_full={len(reports_map_full)} | map_noround={len(reports_map_noround)}"
         )
-        if reports_map:
-            logger.info(f"Reporty sample keys: {list(reports_map.keys())[:3]}")
+        if report_items:
+            logger.info(f"Report sample item: {report_items[0]}")
 
-        # API
+        # 2) API
         api_headers = {
             "Accept": "application/json, text/plain, */*",
             "X-Requested-With": "XMLHttpRequest",
@@ -255,33 +282,25 @@ def main() -> int:
         else:
             matches = parse_matches_api_json(json_text)
             logger.info(f"Zápasy: našlo sa {len(matches)} položiek (API).")
-
             if matches:
                 logger.info(f"API sample keys: {[m.get('match_key') for m in matches[:3]]}")
 
             matched_reports = 0
 
             for m in matches:
-                mk_api = _normalize_match_key_for_join(m.get("match_key") or "")
-                report_url = reports_map.get(mk_api)
+                # 1) full key (ako v API parseri)
+                mk_api_full = _norm_key(m.get("match_key") or "")
+                report_url = reports_map_full.get(mk_api_full)
 
-                # fallback (ak by niekedy match_key v API parseri nebol rovnaký)
+                # 2) fallback bez round (najčastejší dôvod 0/61)
                 if not report_url:
-                    fallback = _normalize_match_key_for_join(
-                        _build_fallback_key(
-                            m.get("date_iso"),
-                            m.get("round"),
-                            m.get("team_home"),
-                            m.get("team_away"),
-                        )
-                    )
-                    report_url = reports_map.get(fallback)
+                    mk_api_nr = _build_key_noround(m.get("date_iso"), m.get("team_home"), m.get("team_away"))
+                    mk_api_nr = _norm_key(mk_api_nr)
+                    report_url = reports_map_noround.get(mk_api_nr)
 
-                if report_url:
+                m["report_url"] = report_url or None
+                if m["report_url"]:
                     matched_reports += 1
-                    m["report_url"] = report_url
-                else:
-                    m["report_url"] = None
 
                 if args.dry_run:
                     logger.info(
