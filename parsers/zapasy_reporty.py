@@ -1,45 +1,94 @@
+# parsers/zapasy_reporty.py
 from __future__ import annotations
 
-import unicodedata
+import re
 from bs4 import BeautifulSoup
 
 
-def _norm_text(x: str | None) -> str | None:
+def _norm(x: str | None) -> str | None:
     if x is None:
         return None
-    s = str(x).replace("\xa0", " ").strip()
-    s = " ".join(s.split())
-    s = unicodedata.normalize("NFKC", s)
+    s = str(x).strip()
     return s or None
+
+
+def _norm_ws(s: str | None) -> str:
+    return " ".join((s or "").strip().split())
+
+
+def _norm_round(s: str | None) -> str:
+    """
+    Zjednotí formát kola:
+    - odstráni extra whitespace
+    - zjednotí bodky a medzery (napr. "36. kolo" vs "36.kolo")
+    """
+    t = _norm_ws(s)
+    if not t:
+        return ""
+    t = t.replace(" .", ".").replace(". ", ".")
+    t = re.sub(r"\s+", " ", t)
+    return t.strip()
 
 
 def _abs_url(base_url: str, href: str) -> str:
     href = (href or "").strip()
+    if not href:
+        return ""
     if href.startswith("http"):
         return href
+    if href.startswith("//"):
+        return "https:" + href
     if href.startswith("/"):
         return base_url.rstrip("/") + href
     return base_url.rstrip("/") + "/" + href
 
 
+def _looks_like_report_href(href: str) -> bool:
+    """
+    Report na HK Košice typicky vyzerá ako:
+      /a-muzstvo/zapasy/<slug>
+    alebo môže obsahovať aj ďalšie segmenty, ale pointa je ".../zapasy/..."
+    """
+    h = (href or "").strip().lower()
+    if not h:
+        return False
+
+    # najistejšie: sekcia zapasy články
+    if "/a-muzstvo/zapasy/" in h:
+        return True
+
+    # fallback – keby mali iný tvar, ale stále obsahuje "/zapasy/" a nie je to samotný list
+    if "/zapasy/" in h and not h.endswith("/zapasy") and not h.endswith("/zapasy/"):
+        return True
+
+    return False
+
+
 def parse_match_reports(html: str, base_url: str) -> list[dict]:
     """
     Vytiahne report_url z HTML stránky zápasov.
-    Vráti list dictov: {date_iso, date_text, round, team_home, team_away, match_key, match_key_noround, report_url}
+    Vracia list dictov:
+      {
+        "match_key": "...",
+        "match_key_swapped": "...",
+        "match_key_noround": "...",
+        "match_key_noround_swapped": "...",
+        "report_url": "..."
+      }
+
+    match_key štýl:
+      key_date|key_round|home|away
+    kde key_date berieme prioritne z time[datetime], fallback z textu.
     """
     soup = BeautifulSoup(html, "lxml")
     out: list[dict] = []
 
-    # Tip: keď sú tabu, toto zoberie aj played aj upcoming, ale report link filtruje
     for item in soup.select(".matches-list__item"):
-        # report link
+        # --- report link: nehľadaj podľa textu, ale podľa href patternu ---
         report_a = None
         for a in item.select("a[href]"):
-            txt = (a.get_text(" ", strip=True) or "").lower()
             href = (a.get("href") or "").strip()
-            if not href:
-                continue
-            if "report" in txt:
+            if _looks_like_report_href(href):
                 report_a = a
                 break
 
@@ -50,40 +99,43 @@ def parse_match_reports(html: str, base_url: str) -> list[dict]:
         if not report_url:
             continue
 
+        # --- date ---
         time_el = item.select_one("time.matches-list__date")
-        date_text = _norm_text(time_el.get_text(" ", strip=True) if time_el else None)
-        date_iso = _norm_text(time_el.get("datetime") if time_el else None)
+        date_text = _norm(time_el.get_text(" ", strip=True) if time_el else None)
+        date_iso = _norm(time_el.get("datetime") if time_el else None)
 
+        key_date = _norm_ws(date_iso or date_text)
+
+        # --- round ---
         round_el = item.select_one(".matches-list__round")
-        round_text = _norm_text(round_el.get_text(" ", strip=True) if round_el else None)
+        round_text_raw = _norm(round_el.get_text(" ", strip=True) if round_el else None)
+        key_round = _norm_round(round_text_raw)
 
+        # --- teams ---
         team_names = [
-            _norm_text(x.get_text(" ", strip=True))
-            for x in item.select(".matches-list__team-names .matches-list__team-name")
+            _norm_ws(x.get_text(" ", strip=True))
+            for x in item.select(".matches-list__team-names > .matches-list__team-name")
         ]
-        team_home = team_names[0] if len(team_names) > 0 else None
-        team_away = team_names[1] if len(team_names) > 1 else None
+        team_home = team_names[0] if len(team_names) > 0 else ""
+        team_away = team_names[1] if len(team_names) > 1 else ""
 
-        key_date = (date_iso or date_text or "").strip()
-        key_round = (round_text or "").strip()
-        key_home = (team_home or "").strip()
-        key_away = (team_away or "").strip()
+        # poskladáme kľúče
+        match_key = "|".join([key_date, key_round, team_home, team_away]).strip("|")
+        match_key_swapped = "|".join([key_date, key_round, team_away, team_home]).strip("|")
 
-        match_key = "|".join([key_date, key_round, key_home, key_away]).strip("|")
-        match_key_noround = "|".join([key_date, key_home, key_away]).strip("|")
+        # fallback bez round (keď sa round líši formátom / chýba)
+        match_key_noround = "|".join([key_date, team_home, team_away]).strip("|")
+        match_key_noround_swapped = "|".join([key_date, team_away, team_home]).strip("|")
 
-        if not key_date or not key_home or not key_away:
+        if not match_key or not key_date:
             continue
 
         out.append(
             {
-                "date_iso": date_iso,
-                "date_text": date_text,
-                "round": round_text,
-                "team_home": team_home,
-                "team_away": team_away,
                 "match_key": match_key,
+                "match_key_swapped": match_key_swapped,
                 "match_key_noround": match_key_noround,
+                "match_key_noround_swapped": match_key_noround_swapped,
                 "report_url": report_url,
             }
         )
